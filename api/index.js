@@ -9,7 +9,7 @@ import { randomUUID } from 'crypto';
 
 // --- KONFIGURASI ---
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
 // --- FUNGSI UPLOADER KE CATBOX.MOE ---
