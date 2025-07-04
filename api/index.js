@@ -10,8 +10,6 @@ import { randomUUID } from 'crypto';
 // --- KONFIGURASI ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// Memberi tahu di mana letak FFmpeg yang kita "bawa"
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
 // --- FUNGSI UPLOADER KE CATBOX.MOE ---
@@ -19,11 +17,10 @@ async function uploadToCatbox(filePath) {
     const form = new FormData();
     form.append('reqtype', 'fileupload');
     form.append('fileToUpload', createReadStream(filePath));
-
     try {
         const response = await axios.post('https://catbox.moe/user/api.php', form, {
             headers: { ...form.getHeaders() },
-            timeout: 60000 // Timeout 1 menit untuk upload
+            timeout: 60000
         });
         if (response.status === 200 && response.data.startsWith('http')) {
             return response.data;
@@ -35,28 +32,30 @@ async function uploadToCatbox(filePath) {
 }
 
 // --- ENDPOINT API ---
-// Kita akan pakai / sebagai root biar lebih simpel saat di-deploy
 app.get('/', async (req, res) => {
     const audioUrl = req.query.url;
-
     if (!audioUrl) {
-        return res.status(400).json({ 
-            status: 'error', 
-            message: 'Parameter URL wajib ada. Contoh: ?url=https://...' 
-        });
+        return res.status(400).json({ status: 'error', message: 'Parameter URL wajib ada. Contoh: ?url=https://...' });
     }
-
     const jobId = randomUUID();
-    // Vercel hanya memperbolehkan penulisan file di folder /tmp
     const inputPath = path.join('/tmp', `${jobId}_input`);
     const outputPath = path.join('/tmp', `${jobId}_output.m4a`);
-    
     console.log(`[${jobId}] Memulai proses untuk URL: ${audioUrl}`);
 
     try {
         // --- Langkah 1: Download File ---
         console.log(`[${jobId}] Tahap 1: Mendownload file...`);
-        const response = await axios({ method: 'get', url: audioUrl, responseType: 'stream' });
+        const response = await axios({
+            method: 'get',
+            url: audioUrl,
+            responseType: 'stream',
+            // ===================================================================
+            // KUNCI PERBAIKAN: Menyamar jadi browser Chrome biar tidak diblokir
+            // ===================================================================
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+            }
+        });
         const writer = createWriteStream(inputPath);
         response.data.pipe(writer);
         await new Promise((resolve, reject) => {
@@ -68,10 +67,7 @@ app.get('/', async (req, res) => {
         console.log(`[${jobId}] Tahap 2: Mengonversi ke AAC (M4A)...`);
         await new Promise((resolve, reject) => {
             ffmpeg(inputPath)
-                .outputOptions([
-                    '-c:a aac',    // Codec audio AAC, paling kompatibel
-                    '-b:a 96k'     // Bitrate 96kbps, kualitas bagus ukuran kecil
-                ])
+                .outputOptions(['-c:a aac', '-b:a 96k'])
                 .save(outputPath)
                 .on('end', () => resolve())
                 .on('error', (err) => reject(new Error(`FFmpeg error: ${err.message}`)));
@@ -108,7 +104,6 @@ app.get('/', async (req, res) => {
 });
 
 // Jalankan server untuk testing lokal
-// Vercel akan mengabaikan ini dan menggunakan `export default`
 app.listen(PORT, () => {
     console.log(`Server untuk testing lokal jalan di http://localhost:${PORT}`);
 });
