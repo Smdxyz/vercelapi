@@ -4,6 +4,7 @@ import axios from 'axios';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import FormData from 'form-data';
+import { fileTypeFromBuffer } from 'file-type';
 import { createReadStream } from 'fs';
 import { writeFile, unlink, stat } from 'fs/promises';
 import path from 'path';
@@ -13,7 +14,7 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
-// --- Fungsi Upload ke Catbox ---
+// --- Fungsi upload ke Catbox ---
 async function uploadToCatbox(filePath) {
     const form = new FormData();
     form.append('reqtype', 'fileupload');
@@ -32,7 +33,7 @@ async function uploadToCatbox(filePath) {
     }
 }
 
-// --- Endpoint API ---
+// --- Endpoint utama ---
 app.get('/', async (req, res) => {
     const audioUrl = req.query.url;
     if (!audioUrl) {
@@ -45,11 +46,12 @@ app.get('/', async (req, res) => {
     const jobId = randomUUID();
     const inputPath = path.join('/tmp', `${jobId}_input.mp3`);
     const outputPath = path.join('/tmp', `${jobId}_output.m4a`);
+    const rawBackup = path.join('/tmp', `${jobId}_raw.mp3`);
 
     console.log(`\n[${jobId}] Memulai proses untuk URL: ${audioUrl}`);
 
     try {
-        // === Tahap 1: Download File ===
+        // === Tahap 1: Download file dengan got ===
         console.log(`[${jobId}] Tahap 1: Mendownload file dengan got...`);
         const buffer = await got(audioUrl, {
             headers: {
@@ -63,29 +65,36 @@ app.get('/', async (req, res) => {
             retry: { limit: 0 }
         }).buffer();
 
+        // Validasi MIME
+        const type = await fileTypeFromBuffer(buffer);
+        console.log(`[${jobId}] Deteksi MIME: ${type?.mime || 'unknown'}`);
+        if (!type || !type.mime.startsWith('audio/')) {
+            await writeFile(rawBackup, buffer);
+            throw new Error(`File bukan audio valid. Tersimpan di: ${rawBackup}`);
+        }
+
         await writeFile(inputPath, buffer);
         const fileStats = await stat(inputPath);
         console.log(`[${jobId}] File disimpan (${(fileStats.size / 1024).toFixed(2)} KB)`);
 
-        if (fileStats.size < 1024) {
-            throw new Error('File terlalu kecil, kemungkinan bukan audio valid.');
+        if (fileStats.size < 50 * 1024) {
+            await writeFile(rawBackup, buffer);
+            throw new Error(`File terlalu kecil (${fileStats.size} bytes). Tersimpan di: ${rawBackup}`);
         }
 
         // === Tahap 2: Konversi dengan FFmpeg ===
         console.log(`[${jobId}] Tahap 2: Konversi dengan FFmpeg...`);
         await new Promise((resolve, reject) => {
             ffmpeg(inputPath)
-                .inputFormat('mp3') // paksa baca sebagai mp3
+                .inputFormat('mp3') // paksa input sebagai mp3
                 .outputOptions(['-c:a aac', '-b:a 96k'])
                 .save(outputPath)
-                .on('start', (cmd) => {
-                    console.log(`[${jobId}] FFmpeg CMD: ${cmd}`);
-                })
+                .on('start', (cmd) => console.log(`[${jobId}] FFmpeg CMD: ${cmd}`))
                 .on('end', () => {
                     console.log(`[${jobId}] Konversi selesai ✅`);
                     resolve();
                 })
-                .on('error', (err) => {
+                .on('error', err => {
                     reject(new Error(`FFmpeg error: ${err.message}`));
                 });
         });
@@ -94,7 +103,7 @@ app.get('/', async (req, res) => {
         console.log(`[${jobId}] Tahap 3: Upload ke Catbox...`);
         const publicUrl = await uploadToCatbox(outputPath);
 
-        // === Tahap 4: Kirim Respon ===
+        // === Tahap 4: Kirim respons ke client ===
         console.log(`[${jobId}] Selesai ✅ Link: ${publicUrl}`);
         res.status(200).json({
             status: 'success',
@@ -115,10 +124,10 @@ app.get('/', async (req, res) => {
             details: error.message
         });
     } finally {
-        // === Tahap Akhir: Cleanup ===
         console.log(`[${jobId}] Tahap Akhir: Bersih-bersih...`);
         await unlink(inputPath).catch(() => {});
         await unlink(outputPath).catch(() => {});
+        // Jangan hapus rawBackup, itu buat debug kalau gagal
     }
 });
 
