@@ -7,12 +7,11 @@ import { createReadStream, promises as fs, createWriteStream } from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 
-// --- KONFIGURASI ---
 const app = express();
 const PORT = process.env.PORT || 8080;
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
-// --- FUNGSI UPLOADER KE CATBOX.MOE ---
+// --- Fungsi upload ke Catbox ---
 async function uploadToCatbox(filePath) {
     const form = new FormData();
     form.append('reqtype', 'fileupload');
@@ -31,31 +30,36 @@ async function uploadToCatbox(filePath) {
     }
 }
 
-// --- ENDPOINT API ---
+// --- Endpoint utama ---
 app.get('/', async (req, res) => {
     const audioUrl = req.query.url;
     if (!audioUrl) {
         return res.status(400).json({ status: 'error', message: 'Parameter URL wajib ada. Contoh: ?url=https://...' });
     }
+
     const jobId = randomUUID();
     const inputPath = path.join('/tmp', `${jobId}_input`);
     const outputPath = path.join('/tmp', `${jobId}_output.m4a`);
     console.log(`[${jobId}] Memulai proses untuk URL: ${audioUrl}`);
 
     try {
-        // --- Langkah 1: Download File ---
+        // --- Tahap 1: Download file audio ---
         console.log(`[${jobId}] Tahap 1: Mendownload file...`);
         const response = await axios({
             method: 'get',
             url: audioUrl,
             responseType: 'stream',
-            // ===================================================================
-            // KUNCI PERBAIKAN: Menyamar jadi browser Chrome biar tidak diblokir
-            // ===================================================================
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Encoding': 'identity',
+                'Referer': 'https://cloudkuimages.com/',
+                'Origin': 'https://cloudkuimages.com',
+                'Connection': 'keep-alive',
+                'Host': 'cloudkuimages.com'
             }
         });
+
         const writer = createWriteStream(inputPath);
         response.data.pipe(writer);
         await new Promise((resolve, reject) => {
@@ -63,21 +67,21 @@ app.get('/', async (req, res) => {
             writer.on('error', reject);
         });
 
-        // --- Langkah 2: Konversi dengan FFmpeg ---
+        // --- Tahap 2: Konversi ke M4A ---
         console.log(`[${jobId}] Tahap 2: Mengonversi ke AAC (M4A)...`);
         await new Promise((resolve, reject) => {
             ffmpeg(inputPath)
                 .outputOptions(['-c:a aac', '-b:a 96k'])
                 .save(outputPath)
-                .on('end', () => resolve())
-                .on('error', (err) => reject(new Error(`FFmpeg error: ${err.message}`)));
+                .on('end', resolve)
+                .on('error', err => reject(new Error(`FFmpeg error: ${err.message}`)));
         });
 
-        // --- Langkah 3: Upload Hasil Konversi ---
+        // --- Tahap 3: Upload hasil ke Catbox ---
         console.log(`[${jobId}] Tahap 3: Mengunggah hasil ke Catbox...`);
         const publicUrl = await uploadToCatbox(outputPath);
 
-        // --- Langkah 4: Kirim Respon Sukses ---
+        // --- Tahap 4: Kirim respons sukses ---
         console.log(`[${jobId}] Selesai! Mengirim URL: ${publicUrl}`);
         res.status(200).json({
             status: 'success',
@@ -90,23 +94,22 @@ app.get('/', async (req, res) => {
 
     } catch (error) {
         console.error(`[${jobId}] GAGAL:`, error);
-        res.status(500).json({ 
-            status: 'error', 
-            message: 'Terjadi kesalahan pada server saat memproses audio.',
-            details: error.message 
+        res.status(500).json({
+            status: 'error',
+            message: 'Terjadi kesalahan saat memproses audio.',
+            details: error.message
         });
     } finally {
-        // --- Langkah 5 (PENTING): Bersihkan File Sampah ---
+        // --- Tahap akhir: Bersihkan file sementara ---
         console.log(`[${jobId}] Tahap Akhir: Membersihkan file sementara...`);
         await fs.unlink(inputPath).catch(() => {});
         await fs.unlink(outputPath).catch(() => {});
     }
 });
 
-// Jalankan server untuk testing lokal
+// Jalankan server lokal
 app.listen(PORT, () => {
     console.log(`Server untuk testing lokal jalan di http://localhost:${PORT}`);
 });
 
-// Export app agar bisa dijalankan oleh Vercel
 export default app;
