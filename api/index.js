@@ -1,14 +1,13 @@
 import express from 'express';
-import got from 'got';
-import axios from 'axios';
+import ytdl from 'ytdl-core';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
+import axios from 'axios';
 import FormData from 'form-data';
-import { fileTypeFromBuffer } from 'file-type';
 import { createReadStream } from 'fs';
-import { writeFile, unlink, stat } from 'fs/promises';
-import path from 'path';
+import { writeFile, unlink } from 'fs/promises';
 import { randomUUID } from 'crypto';
+import path from 'path';
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -19,119 +18,71 @@ async function uploadToCatbox(filePath) {
     const form = new FormData();
     form.append('reqtype', 'fileupload');
     form.append('fileToUpload', createReadStream(filePath));
-    try {
-        const response = await axios.post('https://catbox.moe/user/api.php', form, {
-            headers: form.getHeaders(),
-            timeout: 60000
-        });
-        if (response.status === 200 && response.data.startsWith('http')) {
-            return response.data;
-        }
-        throw new Error('Gagal upload atau respons Catbox tidak valid.');
-    } catch (error) {
-        throw new Error(`Gagal menghubungi Catbox: ${error.message}`);
+
+    const res = await axios.post('https://catbox.moe/user/api.php', form, {
+        headers: form.getHeaders(),
+        timeout: 60000
+    });
+
+    if (res.status === 200 && res.data.startsWith('http')) {
+        return res.data;
     }
+    throw new Error('Gagal upload ke Catbox');
 }
 
 // --- Endpoint utama ---
 app.get('/', async (req, res) => {
-    const audioUrl = req.query.url;
-    if (!audioUrl) {
-        return res.status(400).json({
-            status: 'error',
-            message: 'Parameter ?url= wajib ada'
-        });
+    const videoUrl = req.query.url;
+    if (!videoUrl || !ytdl.validateURL(videoUrl)) {
+        return res.status(400).json({ status: 'error', message: 'Masukkan URL YouTube yang valid di ?url=' });
     }
 
     const jobId = randomUUID();
-    const inputPath = path.join('/tmp', `${jobId}_input.mp3`);
-    const outputPath = path.join('/tmp', `${jobId}_output.m4a`);
-    const rawBackup = path.join('/tmp', `${jobId}_raw.mp3`);
+    const tmpOutput = path.join('/tmp', `${jobId}.m4a`);
 
-    console.log(`\n[${jobId}] Memulai proses untuk URL: ${audioUrl}`);
+    console.log(`\n[${jobId}] Mulai proses untuk: ${videoUrl}`);
 
     try {
-        // === Tahap 1: Download file dengan got ===
-        console.log(`[${jobId}] Tahap 1: Mendownload file dengan got...`);
-        const buffer = await got(audioUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                'Referer': 'https://cloudkuimages.com/',
-                'Origin': 'https://cloudkuimages.com',
-                'Accept': '*/*'
-            },
-            responseType: 'buffer',
-            http2: true,
-            retry: { limit: 0 }
-        }).buffer();
+        // === Tahap 1: Ambil audio stream dari YouTube ===
+        const stream = ytdl(videoUrl, { quality: 'highestaudio' });
 
-        // Validasi MIME
-        const type = await fileTypeFromBuffer(buffer);
-        console.log(`[${jobId}] Deteksi MIME: ${type?.mime || 'unknown'}`);
-        if (!type || !type.mime.startsWith('audio/')) {
-            await writeFile(rawBackup, buffer);
-            throw new Error(`File bukan audio valid. Tersimpan di: ${rawBackup}`);
-        }
-
-        await writeFile(inputPath, buffer);
-        const fileStats = await stat(inputPath);
-        console.log(`[${jobId}] File disimpan (${(fileStats.size / 1024).toFixed(2)} KB)`);
-
-        if (fileStats.size < 50 * 1024) {
-            await writeFile(rawBackup, buffer);
-            throw new Error(`File terlalu kecil (${fileStats.size} bytes). Tersimpan di: ${rawBackup}`);
-        }
-
-        // === Tahap 2: Konversi dengan FFmpeg ===
-        console.log(`[${jobId}] Tahap 2: Konversi dengan FFmpeg...`);
+        // === Tahap 2: Konversi ke M4A ===
+        console.log(`[${jobId}] Mengonversi ke M4A...`);
         await new Promise((resolve, reject) => {
-            ffmpeg(inputPath)
-                .inputFormat('mp3') // paksa input sebagai mp3
-                .outputOptions(['-c:a aac', '-b:a 96k'])
-                .save(outputPath)
-                .on('start', (cmd) => console.log(`[${jobId}] FFmpeg CMD: ${cmd}`))
-                .on('end', () => {
-                    console.log(`[${jobId}] Konversi selesai ✅`);
-                    resolve();
-                })
-                .on('error', err => {
-                    reject(new Error(`FFmpeg error: ${err.message}`));
-                });
+            ffmpeg(stream)
+                .audioCodec('aac')
+                .audioBitrate(96)
+                .format('ipod') // = M4A
+                .save(tmpOutput)
+                .on('start', cmd => console.log(`[${jobId}] FFmpeg CMD: ${cmd}`))
+                .on('end', resolve)
+                .on('error', err => reject(new Error(`FFmpeg error: ${err.message}`)));
         });
 
         // === Tahap 3: Upload ke Catbox ===
-        console.log(`[${jobId}] Tahap 3: Upload ke Catbox...`);
-        const publicUrl = await uploadToCatbox(outputPath);
+        console.log(`[${jobId}] Mengupload ke Catbox...`);
+        const uploadedUrl = await uploadToCatbox(tmpOutput);
 
-        // === Tahap 4: Kirim respons ke client ===
-        console.log(`[${jobId}] Selesai ✅ Link: ${publicUrl}`);
-        res.status(200).json({
+        // === Kirim hasil ===
+        console.log(`[${jobId}] Berhasil ✅ ${uploadedUrl}`);
+        res.json({
             status: 'success',
-            message: 'Audio berhasil dikonversi.',
             result: {
                 job_id: jobId,
-                original_url: audioUrl,
-                converted_url: publicUrl
+                original: videoUrl,
+                converted_url: uploadedUrl
             }
         });
 
-    } catch (error) {
-        console.error(`[${jobId}] GAGAL ❌:`, error.message);
-        res.status(500).json({
-            status: 'error',
-            job_id: jobId,
-            message: 'Terjadi kesalahan saat memproses audio.',
-            details: error.message
-        });
+    } catch (err) {
+        console.error(`[${jobId}] GAGAL ❌:`, err.message);
+        res.status(500).json({ status: 'error', message: err.message });
     } finally {
-        console.log(`[${jobId}] Tahap Akhir: Bersih-bersih...`);
-        await unlink(inputPath).catch(() => {});
-        await unlink(outputPath).catch(() => {});
-        // Jangan hapus rawBackup, itu buat debug kalau gagal
+        // Cleanup
+        await unlink(tmpOutput).catch(() => {});
     }
 });
 
-// Jalankan server
 app.listen(PORT, () => {
     console.log(`Server jalan di http://localhost:${PORT}`);
 });
