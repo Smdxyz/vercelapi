@@ -1,9 +1,10 @@
 import express from 'express';
+import got from 'got';
 import axios from 'axios';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import FormData from 'form-data';
-import { createReadStream, promises as fs } from 'fs';
+import { createReadStream, promises as fs, writeFile } from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 
@@ -43,26 +44,25 @@ app.get('/', async (req, res) => {
     console.log(`[${jobId}] Memulai proses untuk URL: ${audioUrl}`);
 
     try {
-        // --- Tahap 1: Download file pakai buffer ---
-        console.log(`[${jobId}] Tahap 1: Mendownload file dengan buffer...`);
-        const response = await axios.get(audioUrl, {
-            responseType: 'arraybuffer',
+        // --- Tahap 1: Download pakai GOT (lebih stabil) ---
+        console.log(`[${jobId}] Tahap 1: Mendownload file dengan got...`);
+        const buffer = await got(audioUrl, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                'Accept': '*/*',
-                'Accept-Encoding': 'identity',
                 'Referer': 'https://cloudkuimages.com/',
                 'Origin': 'https://cloudkuimages.com',
-                'Connection': 'keep-alive',
-                'Host': 'cloudkuimages.com'
-            }
-        });
+                'Accept': '*/*'
+            },
+            responseType: 'buffer',
+            http2: true,
+            retry: { limit: 0 }
+        }).buffer();
 
-        await fs.writeFile(inputPath, response.data);
-        console.log(`[${jobId}] Sukses download ke ${inputPath}`);
+        await writeFile(inputPath, buffer);
+        console.log(`[${jobId}] File sukses ditulis ke ${inputPath}`);
 
         // --- Tahap 2: Konversi MP3 ke M4A ---
-        console.log(`[${jobId}] Tahap 2: Mengonversi dengan ffmpeg...`);
+        console.log(`[${jobId}] Tahap 2: Konversi dengan FFmpeg...`);
         await new Promise((resolve, reject) => {
             ffmpeg(inputPath)
                 .outputOptions(['-c:a aac', '-b:a 96k'])
@@ -75,8 +75,8 @@ app.get('/', async (req, res) => {
         console.log(`[${jobId}] Tahap 3: Upload ke Catbox...`);
         const publicUrl = await uploadToCatbox(outputPath);
 
-        // --- Tahap 4: Kirim respon ke client ---
-        console.log(`[${jobId}] Sukses! URL hasil: ${publicUrl}`);
+        // --- Tahap 4: Kirim respon ---
+        console.log(`[${jobId}] Selesai! Link hasil: ${publicUrl}`);
         res.status(200).json({
             status: 'success',
             message: 'Audio berhasil dikonversi.',
@@ -94,7 +94,7 @@ app.get('/', async (req, res) => {
             details: error.message
         });
     } finally {
-        // --- Bersihkan file sementara ---
+        // --- Tahap Akhir: Cleanup file sementara ---
         console.log(`[${jobId}] Tahap Akhir: Bersih-bersih...`);
         await fs.unlink(inputPath).catch(() => {});
         await fs.unlink(outputPath).catch(() => {});
