@@ -4,7 +4,8 @@ import axios from 'axios';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import FormData from 'form-data';
-import { createReadStream, promises as fs, writeFile } from 'fs';
+import { createReadStream } from 'fs';
+import { writeFile, unlink } from 'fs/promises';
 import path from 'path';
 import { randomUUID } from 'crypto';
 
@@ -44,7 +45,7 @@ app.get('/', async (req, res) => {
     console.log(`[${jobId}] Memulai proses untuk URL: ${audioUrl}`);
 
     try {
-        // --- Tahap 1: Download pakai GOT (lebih stabil) ---
+        // --- Tahap 1: Download file dengan got ---
         console.log(`[${jobId}] Tahap 1: Mendownload file dengan got...`);
         const buffer = await got(audioUrl, {
             headers: {
@@ -61,7 +62,7 @@ app.get('/', async (req, res) => {
         await writeFile(inputPath, buffer);
         console.log(`[${jobId}] File sukses ditulis ke ${inputPath}`);
 
-        // --- Tahap 2: Konversi MP3 ke M4A ---
+        // --- Tahap 2: Konversi ke M4A ---
         console.log(`[${jobId}] Tahap 2: Konversi dengan FFmpeg...`);
         await new Promise((resolve, reject) => {
             ffmpeg(inputPath)
@@ -75,7 +76,7 @@ app.get('/', async (req, res) => {
         console.log(`[${jobId}] Tahap 3: Upload ke Catbox...`);
         const publicUrl = await uploadToCatbox(outputPath);
 
-        // --- Tahap 4: Kirim respon ---
+        // --- Tahap 4: Kirim hasil ke client ---
         console.log(`[${jobId}] Selesai! Link hasil: ${publicUrl}`);
         res.status(200).json({
             status: 'success',
@@ -94,10 +95,10 @@ app.get('/', async (req, res) => {
             details: error.message
         });
     } finally {
-        // --- Tahap Akhir: Cleanup file sementara ---
+        // --- Tahap Akhir: Cleanup ---
         console.log(`[${jobId}] Tahap Akhir: Bersih-bersih...`);
-        await fs.unlink(inputPath).catch(() => {});
-        await fs.unlink(outputPath).catch(() => {});
+        await unlink(inputPath).catch(() => {});
+        await unlink(outputPath).catch(() => {});
     }
 });
 
